@@ -1,96 +1,91 @@
+import requests
+from bs4 import BeautifulSoup
 import csv
 import time
-from selenium import webdriver
-from selenium.webdriver.chrome.options import Options
-from selenium.webdriver.common.by import By
 
-# === SETUP SELENIUM ===
-options = Options()
-options.headless = True
-driver = webdriver.Chrome(options=options)
-
-def estrai_info_dettaglio(link):
-    driver.get(link)
-    time.sleep(2)
-
-    data = {
-        "Nome": "",
-        "Link": link,
-        "Indirizzo": "",
-        "Telefono": "",
-        "Email": "",
-        "Sito web": ""
-    }
-
-    # Nome
+# Funzione per estrarre le info dettagliate da una pagina azienda
+def estrai_info_pagina_dettaglio(url):
     try:
-        nome = driver.find_element(By.CSS_SELECTOR, ".info-box-content h4 a").text.strip()
-        data["Nome"] = nome
-    except:
-        pass
+        response = requests.get(url, timeout=15)
+        response.raise_for_status()
+        soup = BeautifulSoup(response.text, 'html.parser')
 
-    # Contatti
-    try:
-        box = driver.find_element(By.CLASS_NAME, "box-body")
-        righe = box.find_elements(By.TAG_NAME, "p")
-        for r in righe:
-            txt = r.text.strip()
-            if "@" in txt:
-                data["Email"] = txt
-            elif txt.lower().startswith("http"):
-                data["Sito web"] = txt
-            elif txt.replace(" ", "").replace("+", "").isdigit():
-                data["Telefono"] = txt
-            else:
-                data["Indirizzo"] = txt
-    except:
-        pass
+        box = soup.select_one('.box-body .list-group')
 
-    print(f"✅ Estratto: {data['Nome']}")
-    return data
+        indirizzo = telefono = email = sito_web = ""
 
-def estrai_tutti():
-    results = []
-    page = 1
+        if box:
+            blocchi = box.find_all('p')
+            for p in blocchi:
+                testo = p.get_text(strip=True)
 
-    while True:
-        url = f"https://catalogo.fiereparma.it/manifestazione/cibus-2024/?pag={page}"
-        print(f"🌐 Carico pagina {page}...")
-        driver.get(url)
-        time.sleep(2)
+                # Se testo vuoto, prova a prendere da <a>
+                if not testo:
+                    a = p.find('a')
+                    if a:
+                        testo = a.get_text(strip=True)
 
-        link_elements = driver.find_elements(By.CSS_SELECTOR, ".info-box-content h4 a")
-        if not link_elements:
-            print("❌ Fine elenco.")
-            break
+                if "@" in testo:
+                    email = testo
+                elif "http" in testo:
+                    sito_web = testo
+                elif p.find('a', href=lambda x: x and x.startswith('tel:')):  # telefono
+                    telefono = testo
+                elif not indirizzo:
+                    indirizzo = testo
 
-        # PRENDIAMO I LINK PRIMA di visitarli
-        links = [a.get_attribute("href") for a in link_elements]
+        return indirizzo, telefono, email, sito_web
 
-        for href in links:
-            dati = estrai_info_dettaglio(href)
-            results.append(dati)
-            time.sleep(1)
+    except Exception as e:
+        print(f"❌ Errore su {url}: {e}")
+        return "", "", "", ""
 
-        page += 1
+# Funzione per estrarre gli espositori da una pagina specifica
+def estrai_espositori_da_pagina(numero_pagina):
+    url = f'https://catalogo.fiereparma.it/manifestazione/cibus-2024/?pag={numero_pagina}'
+    print(f"\n📄 Scansione pagina {numero_pagina}: {url}")
 
-    return results
+    response = requests.get(url)
+    if response.status_code == 404:
+        return None  # Nessuna pagina successiva
+    response.raise_for_status()
 
-def salva_csv(data):
-    keys = ["Nome", "Link", "Indirizzo", "Telefono", "Email", "Sito web"]
-    with open("espositori_completi.csv", "w", encoding="utf-8", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=keys)
-        writer.writeheader()
-        writer.writerows(data)
+    soup = BeautifulSoup(response.text, 'html.parser')
+    espositori = []
 
-def main():
-    try:
-        print("🔍 Avvio scraping espositori CIBUS 2024...")
-        tutti_dati = estrai_tutti()
-        salva_csv(tutti_dati)
-        print(f"✅ Completato! Salvati {len(tutti_dati)} espositori in espositori_completi.csv")
-    finally:
-        driver.quit()
+    for box in soup.select('.info-box'):
+        nome_tag = box.select_one('h4 a')
+        if nome_tag:
+            nome = nome_tag.get_text(strip=True)
+            link = nome_tag['href']
+            espositori.append((nome, link))
 
+    return espositori if espositori else None
+
+# MAIN
 if __name__ == "__main__":
-    main()
+    pagina = 1
+    file_output = 'espositori_cibus2024_completo.csv'
+
+    with open(file_output, mode='w', newline='', encoding='utf-8') as file:
+        writer = csv.writer(file)
+        writer.writerow(['Nome Espositore', 'Link', 'Indirizzo', 'Telefono', 'Email', 'Sito Web'])
+
+        while True:
+            espositori = estrai_espositori_da_pagina(pagina)
+            if not espositori:
+                print("\n✅ Nessuna altra pagina da analizzare. Fine.")
+                break
+
+            for count, (nome, link) in enumerate(espositori, start=1):
+                print(f"🔍 [{nome}] → {link}")
+                indirizzo, telefono, email, sito = estrai_info_pagina_dettaglio(link)
+                writer.writerow([nome, link, indirizzo, telefono, email, sito])
+                print("⏳ Attesa 60 secondi prima del prossimo espositore...")
+                time.sleep(60)
+
+            pagina += 1
+            print("➡️ Passo alla pagina successiva...")
+            time.sleep(5)  # Piccola attesa tra pagine
+
+    print(f"\n✅ File CSV completo salvato in: {file_output}")
